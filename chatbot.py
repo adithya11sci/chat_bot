@@ -27,7 +27,7 @@ for col in NUMERIC_COLS:
 
 # ── Groq client ───────────────────────────────────────────────────────────────
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-MODEL = "llama3-70b-8192"
+MODEL = "llama-3.3-70b-versatile"
 
 # ── Helper: build a compact dataset summary for the LLM ──────────────────────
 def _dataset_summary() -> str:
@@ -138,16 +138,41 @@ Return ONLY valid JSON, no markdown fences, no extra text."""
         intent = {}
 
     # ── Step 2: retrieve matching books ──────────────────────────────────────
-    top_n = int(intent.get("top_n", 5))
+    def _safe_int(val, default):
+        try:
+            return int(val) if val is not None else default
+        except (ValueError, TypeError):
+            return default
+
+    def _safe_float(val, default):
+        try:
+            return float(val) if val is not None else default
+        except (ValueError, TypeError):
+            return default
+
+    def _safe_str(val, default=""):
+        return str(val).strip() if val is not None else default
+
+    top_n      = _safe_int(intent.get("top_n"), 5)
+    min_rating = _safe_float(intent.get("min_rating"), 0.0)
+    max_rating = _safe_float(intent.get("max_rating"), 5.0)
+    sort_by    = _safe_str(intent.get("sort_by"), "average_rating")
+    ascending  = bool(intent.get("ascending", False))
+
+    # Validate sort_by column
+    valid_sorts = {"average_rating", "ratings_count", "published_year", "num_pages"}
+    if sort_by not in valid_sorts:
+        sort_by = "average_rating"
+
     books_df = _search_books(
-        keyword=intent.get("keyword", ""),
-        author=intent.get("author", ""),
-        category=intent.get("category", ""),
-        min_rating=float(intent.get("min_rating", 0.0)),
-        max_rating=float(intent.get("max_rating", 5.0)),
+        keyword=_safe_str(intent.get("keyword")),
+        author=_safe_str(intent.get("author")),
+        category=_safe_str(intent.get("category")),
+        min_rating=min_rating,
+        max_rating=max_rating,
         top_n=top_n,
-        sort_by=intent.get("sort_by", "average_rating"),
-        ascending=bool(intent.get("ascending", False)),
+        sort_by=sort_by,
+        ascending=ascending,
     )
 
     metadata = _df_to_metadata(books_df)
