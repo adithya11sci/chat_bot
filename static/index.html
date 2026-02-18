@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BookMind — AI Book Chatbot</title>
+  <meta name="description" content="Ask anything about books. Get AI-powered answers with rich metadata from our curated dataset." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <!-- ── Animated background ── -->
+  <div class="bg-orbs" aria-hidden="true">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="orb orb-3"></div>
+  </div>
+
+  <!-- ── Header ── -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-icon">📚</span>
+        <span class="logo-text">BookMind</span>
+      </div>
+      <p class="header-tagline">AI-Powered Book Discovery</p>
+    </div>
+  </header>
+
+  <!-- ── Main layout ── -->
+  <main class="main">
+
+    <!-- Left: Chat panel -->
+    <section class="chat-panel" aria-label="Chat interface">
+
+      <!-- Suggested chips -->
+      <div class="chips-row" id="chips-row">
+        <button class="chip" onclick="fillQuery('Give me top 5 books with best ratings')">⭐ Top rated books</button>
+        <button class="chip" onclick="fillQuery('Recommend mystery books with high ratings')">🔍 Mystery books</button>
+        <button class="chip" onclick="fillQuery('Show me books by Agatha Christie')">✍️ Agatha Christie</button>
+        <button class="chip" onclick="fillQuery('Best science fiction books')">🚀 Sci-Fi picks</button>
+        <button class="chip" onclick="fillQuery('Short books under 200 pages with good ratings')">📖 Short reads</button>
+      </div>
+
+      <!-- Messages -->
+      <div class="messages" id="messages" role="log" aria-live="polite">
+        <!-- Welcome message -->
+        <div class="message bot-message" id="welcome-msg">
+          <div class="avatar bot-avatar">🤖</div>
+          <div class="bubble">
+            <p>Hello! I'm <strong>BookMind</strong>, your AI book assistant. I have access to a curated dataset of <strong>2,000+ books</strong>.</p>
+            <p style="margin-top:8px">Ask me anything — top-rated books, recommendations by genre, author searches, and more!</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input bar -->
+      <form class="input-bar" id="chat-form" onsubmit="sendMessage(event)">
+        <textarea
+          id="user-input"
+          class="input-field"
+          placeholder="Ask about books… e.g. 'Top 5 fantasy books with best ratings'"
+          rows="1"
+          maxlength="500"
+          aria-label="Your question"
+        ></textarea>
+        <button type="submit" class="send-btn" id="send-btn" aria-label="Send message">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      </form>
+    </section>
+
+    <!-- Right: Book cards panel -->
+    <aside class="books-panel" aria-label="Book results">
+      <div class="books-panel-header">
+        <h2 class="books-panel-title">📚 Book Results</h2>
+        <span class="books-count" id="books-count"></span>
+      </div>
+      <div class="books-list" id="books-list">
+        <div class="empty-state">
+          <div class="empty-icon">🔎</div>
+          <p>Ask a question to see book recommendations here.</p>
+        </div>
+      </div>
+    </aside>
+
+  </main>
+
+  <!-- ── Toast notification ── -->
+  <div class="toast" id="toast" role="alert" aria-live="assertive"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
