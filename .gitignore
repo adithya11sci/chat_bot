@@ -15,7 +15,8 @@ chroma_db_/
 .DS_Store
 Thumbs.db
 
-# RAG index files (large binaries - rebuilt automatically at startup)
+# RAG index files (large binaries - rebuilt on upload)
+data/
 faiss_index.bin
 tfidf_vectorizer.pkl
 books_metadata.pkl

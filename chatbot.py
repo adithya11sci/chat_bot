@@ -1,16 +1,19 @@
 """
-RAG-based Book Chatbot
-======================
+RAG-based Chatbot with Dynamic Dataset Upload
+==============================================
 Pipeline:
-  1. BUILD  (once at startup) – combine all book fields into a rich text doc,
-             vectorise with TF-IDF, save the matrix + vectoriser to disk.
-  2. RETRIEVE – embed the user query with the same TF-IDF vectoriser,
-                compute cosine similarity, return top-k books.
-  3. GENERATE – pass the retrieved book context to Groq LLM and get a
-                human-friendly answer.
+  1. UPLOAD  – user uploads a CSV via the UI
+  2. BUILD   – combine all fields into a rich text doc,
+               vectorise with TF-IDF, store in FAISS index
+  3. RETRIEVE – embed the user query with the same TF-IDF vectoriser,
+                compute cosine similarity, return top-k rows
+  4. GENERATE – pass the retrieved context to Groq LLM and get a
+                human-friendly answer
 """
 
 import os
+import hashlib
+import json
 import pickle
 import numpy as np
 import pandas as pd
@@ -23,144 +26,218 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-BASE_DIR         = os.path.dirname(__file__)
-CSV_PATH         = os.path.join(BASE_DIR, "books_cleaned.csv")
-FAISS_INDEX_PATH = os.path.join(BASE_DIR, "faiss_index.bin")
-VECTORIZER_PATH  = os.path.join(BASE_DIR, "tfidf_vectorizer.pkl")
-METADATA_PATH    = os.path.join(BASE_DIR, "books_metadata.pkl")
+BASE_DIR = os.path.dirname(__file__)
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+FAISS_INDEX_PATH = os.path.join(DATA_DIR, "faiss_index.bin")
+VECTORIZER_PATH  = os.path.join(DATA_DIR, "tfidf_vectorizer.pkl")
+METADATA_PATH    = os.path.join(DATA_DIR, "books_metadata.pkl")
+DATASET_INFO_PATH = os.path.join(DATA_DIR, "dataset_info.json")
 
 # ── Groq client ───────────────────────────────────────────────────────────────
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 MODEL  = "llama-3.3-70b-versatile"
 
-# ── Load & preprocess CSV ─────────────────────────────────────────────────────
-print("📚 Loading CSV dataset...")
-df = pd.read_csv(CSV_PATH)
-df.columns = [c.strip() for c in df.columns]
-
-TEXT_COLS = ["title", "subtitle", "authors", "categories", "description"]
-for col in TEXT_COLS:
-    if col in df.columns:
-        df[col] = df[col].fillna("")
-
-NUMERIC_COLS = ["average_rating", "num_pages", "ratings_count", "published_year"]
-for col in NUMERIC_COLS:
-    if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-print(f"✅ Loaded {len(df)} books.")
+# ── Mutable runtime state ─────────────────────────────────────────────────────
+_state = {
+    "faiss_index":      None,
+    "tfidf_vectorizer": None,
+    "books_metadata":   [],
+    "dataset_name":     None,
+    "dataset_rows":     0,
+    "dataset_columns":  [],
+    "dataset_hash":     None,
+    "ready":            False,
+}
 
 
-# ── Build rich text document per book ────────────────────────────────────────
-def _make_doc(row: pd.Series) -> str:
-    """
-    Concatenate ALL meaningful fields into a single text string per book.
-    The richer the text, the better the retrieval quality.
-    Title/author/category words are repeated to boost their search weight.
-    """
-    title      = row.get("title", "")
-    subtitle   = row.get("subtitle", "")
-    authors    = row.get("authors", "")
-    categories = row.get("categories", "")
-    desc       = row.get("description", "")
-
-    rating = ""
-    year   = ""
-    pages  = ""
-    if pd.notna(row.get("average_rating")):
-        rating = f"rating {row['average_rating']:.1f}"
-    if pd.notna(row.get("published_year")):
-        year = f"published {int(row['published_year'])}"
-    if pd.notna(row.get("num_pages")):
-        pages = f"{int(row['num_pages'])} pages"
-
-    # Repeat title + author + categories to give them higher TF-IDF weight
-    return (
-        f"{title} {title} {subtitle} "
-        f"{authors} {authors} "
-        f"{categories} {categories} "
-        f"{desc} "
-        f"{rating} {year} {pages}"
-    ).strip()
+# ── Hashing ───────────────────────────────────────────────────────────────────
+def _bytes_hash(data: bytes) -> str:
+    return hashlib.md5(data).hexdigest()
 
 
-# ── Build or load FAISS + TF-IDF index ───────────────────────────────────────
-def _build_index():
-    """Vectorise all book documents and store in a FAISS index."""
-    print(f"⏳ Building TF-IDF + FAISS index for {len(df)} books...")
+# ── Preprocess a DataFrame ────────────────────────────────────────────────────
+def _preprocess(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [c.strip() for c in df.columns]
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].fillna("")
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
-    docs = df.apply(_make_doc, axis=1).tolist()
+
+# ── Build a combined text doc per row ─────────────────────────────────────────
+def _make_doc(row: pd.Series, columns: list) -> str:
+    boost_cols = {"title", "subtitle", "authors", "categories", "name",
+                  "genre", "director", "movie", "book", "subject"}
+    parts = []
+    for col in columns:
+        val = row.get(col, "")
+        if pd.isna(val) or val == "":
+            continue
+        val_str = str(val).strip()
+        if col.lower() in boost_cols:
+            parts.append(f"{val_str} {val_str}")
+        else:
+            parts.append(f"{col}: {val_str}")
+    return " | ".join(parts).strip()
+
+
+# ── Build TF-IDF + FAISS index ────────────────────────────────────────────────
+def _build_index(df: pd.DataFrame, dataset_name: str, dataset_hash: str):
+    print(f"⏳ Building index for '{dataset_name}' ({len(df)} rows)...")
+
+    columns = df.columns.tolist()
+    docs = df.apply(lambda r: _make_doc(r, columns), axis=1).tolist()
 
     vectorizer = TfidfVectorizer(
-        max_features=30_000,
-        sublinear_tf=True,       # log-normalise term frequencies
-        ngram_range=(1, 2),      # unigrams + bigrams for better coverage
-        min_df=2,
+        max_features=15_000,
+        sublinear_tf=True,
+        ngram_range=(1, 1),
+        min_df=1,
     )
-    tfidf_matrix = vectorizer.fit_transform(docs)  # sparse (n_books × vocab)
-
-    # Normalise rows → cosine similarity = inner product
+    tfidf_matrix = vectorizer.fit_transform(docs)
     dense = normalize(tfidf_matrix, norm="l2").toarray().astype(np.float32)
 
     dim   = dense.shape[1]
-    index = faiss.IndexFlatIP(dim)   # Inner Product on L2-normalised vecs = cosine
+    index = faiss.IndexFlatIP(dim)
     index.add(dense)
 
-    # Persist to disk
+    # Persist
     faiss.write_index(index, FAISS_INDEX_PATH)
     with open(VECTORIZER_PATH, "wb") as f:
         pickle.dump(vectorizer, f)
     metadata = df.to_dict(orient="records")
     with open(METADATA_PATH, "wb") as f:
         pickle.dump(metadata, f)
+    info = {
+        "hash": dataset_hash,
+        "name": dataset_name,
+        "rows": len(df),
+        "columns": columns,
+    }
+    with open(DATASET_INFO_PATH, "w") as f:
+        json.dump(info, f, indent=2)
 
-    print(f"✅ Index built and saved. Vocab size: {len(vectorizer.vocabulary_)}")
-    return index, vectorizer, metadata
+    # Hot-swap state
+    _state["faiss_index"]      = index
+    _state["tfidf_vectorizer"] = vectorizer
+    _state["books_metadata"]   = metadata
+    _state["dataset_name"]     = dataset_name
+    _state["dataset_rows"]     = len(df)
+    _state["dataset_columns"]  = columns
+    _state["dataset_hash"]     = dataset_hash
+    _state["ready"]            = True
+
+    print(f"✅ Index built. Vocab: {len(vectorizer.vocabulary_)}, Rows: {len(df)}")
 
 
-def _load_index():
-    print("✅ Loading existing FAISS index from disk...")
+def _load_index_from_disk():
+    print("✅ Loading existing index from disk...")
     index = faiss.read_index(FAISS_INDEX_PATH)
     with open(VECTORIZER_PATH, "rb") as f:
         vectorizer = pickle.load(f)
     with open(METADATA_PATH, "rb") as f:
         metadata = pickle.load(f)
-    return index, vectorizer, metadata
+    with open(DATASET_INFO_PATH) as f:
+        info = json.load(f)
+
+    _state["faiss_index"]      = index
+    _state["tfidf_vectorizer"] = vectorizer
+    _state["books_metadata"]   = metadata
+    _state["dataset_name"]     = info.get("name", "Unknown")
+    _state["dataset_rows"]     = info.get("rows", len(metadata))
+    _state["dataset_columns"]  = info.get("columns", [])
+    _state["dataset_hash"]     = info.get("hash")
+    _state["ready"]            = True
+    print(f"✅ Loaded '{_state['dataset_name']}' ({_state['dataset_rows']} rows)")
 
 
-# Startup: build or load
-if (
-    os.path.exists(FAISS_INDEX_PATH)
-    and os.path.exists(VECTORIZER_PATH)
-    and os.path.exists(METADATA_PATH)
-):
-    faiss_index, tfidf_vectorizer, books_metadata = _load_index()
+# ── Public: load dataset (called from /upload endpoint) ──────────────────────
+def load_dataset(csv_path: str, filename: str, csv_bytes: bytes) -> dict:
+    new_hash = _bytes_hash(csv_bytes)
+
+    # Check if same dataset already loaded
+    if os.path.exists(DATASET_INFO_PATH):
+        with open(DATASET_INFO_PATH) as f:
+            info = json.load(f)
+        if info.get("hash") == new_hash:
+            if not _state["ready"]:
+                _load_index_from_disk()
+            return {
+                "status":  "already_loaded",
+                "message": f"'{filename}' is already indexed and ready!",
+                "name":    _state["dataset_name"],
+                "rows":    _state["dataset_rows"],
+                "columns": _state["dataset_columns"],
+            }
+
+    # New dataset → preprocess and build
+    try:
+        df = pd.read_csv(csv_path)
+        df = _preprocess(df)
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to read CSV: {e}"}
+
+    if df.empty:
+        return {"status": "error", "message": "The uploaded CSV is empty."}
+
+    _build_index(df, filename, new_hash)
+
+    return {
+        "status":  "built",
+        "message": f"'{filename}' indexed successfully!",
+        "name":    filename,
+        "rows":    len(df),
+        "columns": df.columns.tolist(),
+    }
+
+
+# ── Public: get current status ────────────────────────────────────────────────
+def get_status() -> dict:
+    return {
+        "ready":   _state["ready"],
+        "name":    _state["dataset_name"],
+        "rows":    _state["dataset_rows"],
+        "columns": _state["dataset_columns"],
+    }
+
+
+# ── Startup: load existing index if present ──────────────────────────────────
+if all(os.path.exists(p) for p in [FAISS_INDEX_PATH, VECTORIZER_PATH,
+                                    METADATA_PATH, DATASET_INFO_PATH]):
+    _load_index_from_disk()
 else:
-    faiss_index, tfidf_vectorizer, books_metadata = _build_index()
+    print("📂 No dataset indexed yet. Upload a CSV via the UI to get started.")
 
 
 # ── RAG Retrieval ─────────────────────────────────────────────────────────────
-def _retrieve(query: str, top_k: int = 7) -> list[dict]:
-    """
-    Embed the user query using the same TF-IDF vectoriser and find the
-    top-k most semantically similar books via FAISS cosine similarity.
-    """
-    query_vec = tfidf_vectorizer.transform([query])
-    query_dense = normalize(query_vec, norm="l2").toarray().astype(np.float32)
+MIN_SCORE = 0.05
 
-    scores, indices = faiss_index.search(query_dense, top_k)
+def _retrieve(query: str, top_k: int = 7) -> list[dict]:
+    if not _state["ready"]:
+        return []
+
+    query_vec   = _state["tfidf_vectorizer"].transform([query])
+    query_dense = normalize(query_vec, norm="l2").toarray().astype(np.float32)
+    scores, indices = _state["faiss_index"].search(query_dense, top_k)
 
     results = []
     for score, idx in zip(scores[0], indices[0]):
         if idx < 0:
             continue
-        book = books_metadata[idx].copy()
+        if float(score) < MIN_SCORE:
+            continue
+        book = _state["books_metadata"][idx].copy()
         book["_score"] = round(float(score), 4)
         results.append(book)
     return results
 
 
-# ── Clean book dict for JSON output ──────────────────────────────────────────
+# ── Clean dict for JSON output ────────────────────────────────────────────────
 def _clean(book: dict) -> dict:
     out = {}
     for k, v in book.items():
@@ -175,68 +252,69 @@ def _clean(book: dict) -> dict:
     return out
 
 
-# ── Main RAG pipeline ─────────────────────────────────────────────────────────
+# ── Main RAG pipeline ────────────────────────────────────────────────────────
 def answer_question(user_query: str) -> dict:
-    """
-    Full RAG pipeline:
-      Retrieve → Augment context → Generate answer with Groq LLM.
-
-    Returns:
-        {
-          "response": <human-friendly answer string>,
-          "metadata": [<book dict>, ...]
+    if not _state["ready"]:
+        return {
+            "response": "No dataset is loaded yet. Please upload a CSV file first.",
+            "metadata": [],
         }
-    """
 
-    # ── 1. RETRIEVE ───────────────────────────────────────────────────────────
+    # Dataset metadata — the LLM needs to know the FULL dataset stats
+    ds_name    = _state["dataset_name"] or "Unknown"
+    ds_rows    = _state["dataset_rows"]
+    ds_columns = _state["dataset_columns"]
+
+    # 1. RETRIEVE
     retrieved = _retrieve(user_query, top_k=7)
 
     if not retrieved:
         return {
             "response": (
-                "I'm sorry, I couldn't find any relevant books for your question. "
-                "Could you rephrase or try a different topic?"
+                "I couldn't find any relevant results for your question. "
+                "Could you rephrase or try different keywords?"
             ),
             "metadata": [],
         }
 
-    # ── 2. AUGMENT – build context from retrieved books ───────────────────────
+    # 2. AUGMENT — build context from retrieved rows
+    columns = ds_columns
     context_blocks = []
     for i, book in enumerate(retrieved):
-        desc = str(book.get("description", "")).strip()
-        desc_preview = desc[:700] if desc else "No description available."
+        lines = [f"[Record {i+1}]"]
+        for col in columns:
+            val = book.get(col, "")
+            if val is None or val == "" or (isinstance(val, float) and np.isnan(val)):
+                continue
+            val_str = str(val)
+            if len(val_str) > 600:
+                val_str = val_str[:600] + "…"
+            lines.append(f"{col}: {val_str}")
+        context_blocks.append("\n".join(lines))
 
-        block = (
-            f"[Book {i+1}]\n"
-            f"Title       : {book.get('title', 'N/A')}\n"
-            f"Subtitle    : {book.get('subtitle', '') or 'N/A'}\n"
-            f"Authors     : {book.get('authors', 'N/A')}\n"
-            f"Categories  : {book.get('categories', 'N/A')}\n"
-            f"Published   : {int(book['published_year']) if pd.notna(book.get('published_year')) else 'N/A'}\n"
-            f"Avg Rating  : {book.get('average_rating', 'N/A')}\n"
-            f"Pages       : {int(book['num_pages']) if pd.notna(book.get('num_pages')) else 'N/A'}\n"
-            f"Ratings Count: {int(book['ratings_count']) if pd.notna(book.get('ratings_count')) else 'N/A'}\n"
-            f"Description : {desc_preview}\n"
-        )
-        context_blocks.append(block)
+    context = ("\n" + "-" * 60 + "\n").join(context_blocks)
 
-    context = "\n" + ("-" * 60) + "\n".join(context_blocks)
-
-    # ── 3. GENERATE – ask Groq LLM to answer from context ────────────────────
+    # 3. GENERATE — system prompt includes FULL dataset metadata
     system_prompt = (
-        "You are an expert book assistant. "
-        "Answer the user's question ONLY using the book information provided in the context below. "
-        "Be warm, conversational, and specific — quote descriptions, ratings, authors, or page counts when relevant. "
-        "If the user asks about the story/plot/content of a book, use the Description field. "
-        "If you cannot find the answer in the context, honestly say so. "
-        "Do NOT make up any information. Plain text only, no markdown."
+        f"You are an expert data assistant for a dataset called '{ds_name}'.\n"
+        f"IMPORTANT DATASET FACTS (use these for aggregate/count questions):\n"
+        f"  - Dataset name: {ds_name}\n"
+        f"  - Total number of records in the FULL dataset: {ds_rows}\n"
+        f"  - Columns: {', '.join(ds_columns)}\n\n"
+        f"RULES:\n"
+        f"1. For questions about total counts, totals, or 'how many', use the DATASET FACTS above "
+        f"   (total records = {ds_rows}), NOT the number of retrieved context records.\n"
+        f"2. The context below shows only the TOP {len(retrieved)} most relevant records out of {ds_rows} total.\n"
+        f"3. Answer using ONLY the dataset facts and context provided. Do NOT invent data.\n"
+        f"4. Be warm, conversational, and specific — quote values when relevant.\n"
+        f"5. Plain text only, no markdown formatting."
     )
 
     user_prompt = (
         f"User's Question:\n{user_query}\n\n"
-        f"Context – Most Relevant Books from the Dataset:\n"
+        f"Context — Top {len(retrieved)} most relevant records (out of {ds_rows} total):\n"
         f"{context}\n\n"
-        "Answer the user's question based solely on the context above."
+        f"Answer the user's question. Remember: the FULL dataset has {ds_rows} records total."
     )
 
     llm_response = client.chat.completions.create(
@@ -245,7 +323,7 @@ def answer_question(user_query: str) -> dict:
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_prompt},
         ],
-        temperature=0.5,
+        temperature=0.3,
         max_tokens=700,
     ).choices[0].message.content.strip()
 

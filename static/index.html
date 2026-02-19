@@ -1,15 +1,19 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>BookMind — AI Book Chatbot</title>
-  <meta name="description" content="Ask anything about books. Get AI-powered answers with rich metadata from our curated dataset." />
+  <meta name="description" content="Upload any CSV dataset and ask AI-powered questions with rich metadata." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap"
+    rel="stylesheet" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
+
 <body>
 
   <!-- ── Animated background ── -->
@@ -26,7 +30,32 @@
         <span class="logo-icon">📚</span>
         <span class="logo-text">BookMind</span>
       </div>
-      <p class="header-tagline">AI-Powered Book Discovery</p>
+
+      <!-- Dataset status badge -->
+      <div class="dataset-badge" id="dataset-badge">
+        <span class="badge-dot" id="badge-dot"></span>
+        <span class="badge-text" id="badge-text">No dataset</span>
+      </div>
+
+      <!-- Upload button -->
+      <label for="csv-file-input" class="upload-btn" id="upload-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+          stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="16 16 12 12 8 16"></polyline>
+          <line x1="12" y1="12" x2="12" y2="21"></line>
+          <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"></path>
+        </svg>
+        <span id="upload-btn-text">Upload Dataset</span>
+      </label>
+      <input type="file" id="csv-file-input" accept=".csv" style="display:none" />
+    </div>
+
+    <!-- Indexing progress bar (hidden by default) -->
+    <div class="indexing-bar" id="indexing-bar" style="display:none">
+      <div class="indexing-track">
+        <div class="indexing-fill" id="indexing-fill"></div>
+      </div>
+      <span class="indexing-label" id="indexing-label">Indexing…</span>
     </div>
   </header>
 
@@ -38,11 +67,11 @@
 
       <!-- Suggested chips -->
       <div class="chips-row" id="chips-row">
-        <button class="chip" onclick="fillQuery('Give me top 5 books with best ratings')">⭐ Top rated books</button>
-        <button class="chip" onclick="fillQuery('Recommend mystery books with high ratings')">🔍 Mystery books</button>
-        <button class="chip" onclick="fillQuery('Show me books by Agatha Christie')">✍️ Agatha Christie</button>
-        <button class="chip" onclick="fillQuery('Best science fiction books')">🚀 Sci-Fi picks</button>
-        <button class="chip" onclick="fillQuery('Short books under 200 pages with good ratings')">📖 Short reads</button>
+        <button class="chip" onclick="fillQuery('Give me top 5 items with best ratings')">⭐ Top rated</button>
+        <button class="chip" onclick="fillQuery('Recommend items with high ratings')">🔍 Best picks</button>
+        <button class="chip" onclick="fillQuery('Show the most popular items')">🔥 Most popular</button>
+        <button class="chip" onclick="fillQuery('Show items published after 2010')">📅 After 2010</button>
+        <button class="chip" onclick="fillQuery('Describe what this dataset contains')">📊 Dataset summary</button>
       </div>
 
       <!-- Messages -->
@@ -51,24 +80,20 @@
         <div class="message bot-message" id="welcome-msg">
           <div class="avatar bot-avatar">🤖</div>
           <div class="bubble">
-            <p>Hello! I'm <strong>BookMind</strong>, your AI book assistant. I have access to a curated dataset of <strong>2,000+ books</strong>.</p>
-            <p style="margin-top:8px">Ask me anything — top-rated books, recommendations by genre, author searches, and more!</p>
+            <p>Hello! I'm <strong>BookMind</strong>, your AI data assistant.</p>
+            <p style="margin-top:8px">Upload a CSV dataset using the button in the header, and I'll index it so you
+              can ask questions about the data!</p>
           </div>
         </div>
       </div>
 
       <!-- Input bar -->
       <form class="input-bar" id="chat-form" onsubmit="sendMessage(event)">
-        <textarea
-          id="user-input"
-          class="input-field"
-          placeholder="Ask about books… e.g. 'Top 5 fantasy books with best ratings'"
-          rows="1"
-          maxlength="500"
-          aria-label="Your question"
-        ></textarea>
-        <button type="submit" class="send-btn" id="send-btn" aria-label="Send message">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <textarea id="user-input" class="input-field" placeholder="Upload a dataset first…" rows="1" maxlength="500"
+          aria-label="Your question" disabled></textarea>
+        <button type="submit" class="send-btn" id="send-btn" aria-label="Send message" disabled>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round">
             <line x1="22" y1="2" x2="11" y2="13"></line>
             <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
           </svg>
@@ -79,13 +104,13 @@
     <!-- Right: Book cards panel -->
     <aside class="books-panel" aria-label="Book results">
       <div class="books-panel-header">
-        <h2 class="books-panel-title">📚 Book Results</h2>
+        <h2 class="books-panel-title">📊 Results</h2>
         <span class="books-count" id="books-count"></span>
       </div>
       <div class="books-list" id="books-list">
         <div class="empty-state">
           <div class="empty-icon">🔎</div>
-          <p>Ask a question to see book recommendations here.</p>
+          <p>Upload a dataset and ask a question to see results here.</p>
         </div>
       </div>
     </aside>
@@ -97,4 +122,5 @@
 
   <script src="/static/app.js"></script>
 </body>
+
 </html>

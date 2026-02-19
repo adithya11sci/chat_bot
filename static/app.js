@@ -1,52 +1,237 @@
+/* ══════════════════════════════════════════════════════════════
+   BookMind — app.js
+   Flow:
+     1. Page loads → check /dataset/status
+        → ready?   → enable chat
+        → not ready → chat disabled, must upload first
+     2. Upload CSV → POST /upload → backend builds index
+        → on success → enable chat
+     3. Chat: POST /chat → display response + book cards
+   ══════════════════════════════════════════════════════════════ */
+
 /* ── State ─────────────────────────────────────────────────────────────────── */
 let isLoading = false;
+let isUploading = false;
+let datasetReady = false;
 
 /* ── DOM refs ──────────────────────────────────────────────────────────────── */
-const messagesEl  = document.getElementById('messages');
-const inputEl     = document.getElementById('user-input');
-const sendBtn     = document.getElementById('send-btn');
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('user-input');
+const sendBtn = document.getElementById('send-btn');
 const booksListEl = document.getElementById('books-list');
-const booksCount  = document.getElementById('books-count');
-const toastEl     = document.getElementById('toast');
-const chipsRow    = document.getElementById('chips-row');
+const booksCount = document.getElementById('books-count');
+const toastEl = document.getElementById('toast');
+const chipsRow = document.getElementById('chips-row');
 
-/* ── Auto-grow textarea ────────────────────────────────────────────────────── */
+// Upload
+const fileInput = document.getElementById('csv-file-input');
+const uploadBtn = document.getElementById('upload-btn');
+const uploadBtnTxt = document.getElementById('upload-btn-text');
+const indexingBar = document.getElementById('indexing-bar');
+const indexingFill = document.getElementById('indexing-fill');
+const indexingLbl = document.getElementById('indexing-label');
+
+// Header badge
+const badgeDot = document.getElementById('badge-dot');
+const badgeText = document.getElementById('badge-text');
+
+
+/* ══════════════════════════════════════════════════════════════
+   STARTUP
+   ══════════════════════════════════════════════════════════════ */
+window.addEventListener('DOMContentLoaded', async () => {
+  setChatEnabled(false);
+  setBadge('loading', 'Loading…');
+
+  try {
+    const res = await fetch('/dataset/status');
+    const info = await res.json();
+    if (info.ready) {
+      onDatasetReady(info.name, info.rows);
+      // Update welcome message for pre-loaded dataset
+      appendMessage('bot', `📊 Dataset "${info.name}" is loaded and ready (${Number(info.rows).toLocaleString()} rows). Ask me anything!`);
+    } else {
+      setBadge('empty', 'No dataset loaded');
+    }
+  } catch {
+    setBadge('error', 'Server error');
+  }
+});
+
+
+/* ══════════════════════════════════════════════════════════════
+   UPLOAD
+   ══════════════════════════════════════════════════════════════ */
+fileInput.addEventListener('change', () => {
+  const file = fileInput.files[0];
+  if (file) handleUpload(file);
+  fileInput.value = '';
+});
+
+async function handleUpload(file) {
+  if (isUploading) return;
+  if (!file.name.toLowerCase().endsWith('.csv')) {
+    showToast('Only CSV files are supported.');
+    return;
+  }
+
+  isUploading = true;
+  setChatEnabled(false);
+  datasetReady = false;
+
+  // UI: show indexing state
+  uploadBtn.classList.add('disabled');
+  uploadBtnTxt.textContent = 'Processing…';
+  setBadge('loading', `Indexing ${file.name}…`);
+  showIndexingBar(`Uploading "${file.name}"…`, 5);
+
+  appendMessage('bot', `📂 Uploading "${file.name}"… Building the search index, please wait.`);
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const progressTimer = animateProgress(5, 90, 20000);
+
+    const res = await fetch('/upload', { method: 'POST', body: formData });
+    clearInterval(progressTimer);
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Upload failed' }));
+      throw new Error(err.detail || 'Upload failed');
+    }
+
+    const data = await res.json();
+
+    if (data.status === 'error') {
+      throw new Error(data.message);
+    }
+
+    // Success
+    setIndexingProgress(100, 'Done!');
+    await sleep(500);
+    hideIndexingBar();
+
+    if (data.status === 'already_loaded') {
+      showToast(`⚡ Already indexed — ${data.name}`);
+      appendMessage('bot', `⚡ "${data.name}" is already indexed and ready! Go ahead and ask questions.`);
+    } else {
+      showToast(`✅ Indexed ${Number(data.rows).toLocaleString()} rows`);
+      appendMessage('bot', `✅ "${data.name}" has been uploaded and indexed! (${Number(data.rows).toLocaleString()} rows). Ask me anything about this dataset.`);
+    }
+
+    onDatasetReady(data.name, data.rows);
+
+  } catch (err) {
+    hideIndexingBar();
+    showToast(`Error: ${err.message}`);
+    appendMessage('bot', `⚠️ Upload failed: ${err.message}`);
+    setBadge('error', 'Upload failed');
+    uploadBtn.classList.remove('disabled');
+    uploadBtnTxt.textContent = 'Upload Dataset';
+  } finally {
+    isUploading = false;
+  }
+}
+
+
+/* ══════════════════════════════════════════════════════════════
+   STATE HELPERS
+   ══════════════════════════════════════════════════════════════ */
+function onDatasetReady(name, rows) {
+  datasetReady = true;
+  setChatEnabled(true);
+  setBadge('ready', `${name} · ${Number(rows).toLocaleString()} rows`);
+  uploadBtn.classList.remove('disabled');
+  uploadBtnTxt.textContent = 'Change Dataset';
+
+  // Update the welcome message to show dataset info
+  const welcomeMsg = document.getElementById('welcome-msg');
+  if (welcomeMsg) {
+    const bubble = welcomeMsg.querySelector('.bubble');
+    if (bubble) {
+      bubble.innerHTML = `
+        <p>Hello! I'm <strong>BookMind</strong>, your AI data assistant.</p>
+        <p style="margin-top:8px">📊 Active dataset: <strong>${escapeHtml(name)}</strong> — <strong>${Number(rows).toLocaleString()}</strong> rows loaded.</p>
+        <p style="margin-top:4px">Ask me anything about this data!</p>
+      `;
+    }
+  }
+}
+
+function setChatEnabled(enabled) {
+  inputEl.disabled = !enabled;
+  sendBtn.disabled = !enabled;
+  inputEl.placeholder = enabled
+    ? 'Ask anything about your dataset…'
+    : 'Upload a dataset first…';
+}
+
+function setBadge(state, text) {
+  badgeDot.className = 'badge-dot';
+  if (state === 'ready') badgeDot.classList.add('dot-ready');
+  if (state === 'loading') badgeDot.classList.add('dot-loading');
+  if (state === 'error') badgeDot.classList.add('dot-error');
+  badgeText.textContent = text;
+}
+
+// Indexing progress bar
+function showIndexingBar(label, pct) {
+  indexingBar.style.display = 'block';
+  indexingFill.style.width = pct + '%';
+  indexingLbl.textContent = label;
+}
+function setIndexingProgress(pct, label) {
+  indexingFill.style.width = pct + '%';
+  indexingLbl.textContent = label;
+}
+function hideIndexingBar() {
+  indexingBar.style.display = 'none';
+  indexingFill.style.width = '0%';
+}
+function animateProgress(from, to, durationMs) {
+  const steps = 60, stepTime = durationMs / steps, stepSize = (to - from) / steps;
+  let cur = from;
+  return setInterval(() => {
+    cur = Math.min(cur + stepSize, to);
+    indexingFill.style.width = cur + '%';
+    indexingLbl.textContent = `Indexing… ${Math.round(cur)}%`;
+  }, stepTime);
+}
+
+
+/* ══════════════════════════════════════════════════════════════
+   CHAT
+   ══════════════════════════════════════════════════════════════ */
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
 });
-
-/* ── Keyboard: Enter sends, Shift+Enter newline ────────────────────────────── */
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    if (!isLoading) sendMessage(e);
+    if (!isLoading && datasetReady) sendMessage(e);
   }
 });
 
-/* ── Fill query from chip ──────────────────────────────────────────────────── */
 function fillQuery(text) {
+  if (!datasetReady) { showToast('Upload a dataset first!'); return; }
   inputEl.value = text;
   inputEl.focus();
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
 }
 
-/* ── Send message ──────────────────────────────────────────────────────────── */
 async function sendMessage(e) {
   e.preventDefault();
   const question = inputEl.value.trim();
-  if (!question || isLoading) return;
+  if (!question || isLoading || !datasetReady) return;
 
-  // Hide chips after first message
   chipsRow.style.display = 'none';
-
-  // Append user bubble
   appendMessage('user', question);
   inputEl.value = '';
   inputEl.style.height = 'auto';
 
-  // Show typing indicator
   const typingId = showTyping();
   setLoading(true);
 
@@ -56,7 +241,6 @@ async function sendMessage(e) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question }),
     });
-
     removeTyping(typingId);
 
     if (!res.ok) {
@@ -77,7 +261,16 @@ async function sendMessage(e) {
   }
 }
 
-/* ── Append a chat bubble ──────────────────────────────────────────────────── */
+function setLoading(val) {
+  isLoading = val;
+  sendBtn.disabled = val || !datasetReady;
+  inputEl.disabled = val || !datasetReady;
+}
+
+
+/* ══════════════════════════════════════════════════════════════
+   MESSAGES
+   ══════════════════════════════════════════════════════════════ */
 function appendMessage(role, text) {
   const isBot = role === 'bot';
   const div = document.createElement('div');
@@ -90,7 +283,6 @@ function appendMessage(role, text) {
   scrollToBottom();
 }
 
-/* ── Typing indicator ──────────────────────────────────────────────────────── */
 function showTyping() {
   const id = 'typing-' + Date.now();
   const div = document.createElement('div');
@@ -114,7 +306,10 @@ function removeTyping(id) {
   if (el) el.remove();
 }
 
-/* ── Render book cards ─────────────────────────────────────────────────────── */
+
+/* ══════════════════════════════════════════════════════════════
+   BOOK CARDS
+   ══════════════════════════════════════════════════════════════ */
 function renderBooks(books) {
   booksListEl.innerHTML = '';
 
@@ -122,79 +317,82 @@ function renderBooks(books) {
     booksListEl.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">📭</div>
-        <p>No specific books found for this query.</p>
+        <p>No matching records found.</p>
       </div>`;
     booksCount.textContent = '';
     return;
   }
 
-  booksCount.textContent = `${books.length} book${books.length !== 1 ? 's' : ''}`;
+  booksCount.textContent = `${books.length} result${books.length !== 1 ? 's' : ''}`;
 
   books.forEach((book, i) => {
     const card = document.createElement('div');
     card.className = 'book-card';
 
-    const rating   = book.average_rating != null ? Number(book.average_rating).toFixed(2) : 'N/A';
-    const year     = book.published_year  != null ? book.published_year : '—';
-    const pages    = book.num_pages       != null ? book.num_pages      : '—';
-    const rCount   = book.ratings_count   != null ? Number(book.ratings_count).toLocaleString() : '—';
-    const title    = book.title    || 'Untitled';
-    const authors  = book.authors  || 'Unknown Author';
-    const category = book.categories || '';
-    const desc     = book.description || '';
+    // Detect columns dynamically
+    const title = pick(book, ['title', 'name', 'movie', 'book', 'product', 'item', 'subject']) || `Record ${i + 1}`;
+    const author = pick(book, ['authors', 'author', 'director', 'creator', 'brand', 'artist']);
+    const rating = pick(book, ['average_rating', 'rating', 'score', 'stars', 'grade']);
+    const year = pick(book, ['published_year', 'year', 'release_year', 'date']);
+    const pages = pick(book, ['num_pages', 'pages', 'length', 'duration']);
+    const votes = pick(book, ['ratings_count', 'votes', 'reviews', 'count']);
+    const cat = pick(book, ['categories', 'category', 'genre', 'type', 'department']);
+    const desc = pick(book, ['description', 'summary', 'overview', 'about', 'content', 'plot']);
 
-    const stars = rating !== 'N/A' ? starsHtml(parseFloat(rating)) : '';
+    const ratingStr = rating != null ? Number(rating).toFixed(2) : null;
+    const stars = ratingStr ? starsHtml(parseFloat(ratingStr)) : '';
+
+    // Build meta tags
+    let metaHtml = '';
+    if (ratingStr) metaHtml += `<span class="meta-tag rating">⭐ ${ratingStr} ${stars}</span>`;
+    if (year != null) metaHtml += `<span class="meta-tag">📅 ${year}</span>`;
+    if (pages != null) metaHtml += `<span class="meta-tag">📄 ${Number(pages)} pp</span>`;
+    if (votes != null) metaHtml += `<span class="meta-tag">🗳️ ${Number(votes).toLocaleString()}</span>`;
 
     card.innerHTML = `
       <div class="book-rank">${i + 1}</div>
       <div class="book-title" title="${escapeAttr(title)}">${escapeHtml(title)}</div>
-      <div class="book-authors">${escapeHtml(authors)}</div>
-      <div class="book-meta">
-        <span class="meta-tag rating">⭐ ${rating} ${stars}</span>
-        <span class="meta-tag">📅 ${year}</span>
-        <span class="meta-tag">📄 ${pages} pp</span>
-        <span class="meta-tag">🗳️ ${rCount} ratings</span>
-      </div>
-      ${category ? `<div class="book-category">🏷️ ${escapeHtml(category)}</div>` : ''}
-      ${desc ? `<div class="book-desc">${escapeHtml(desc.slice(0, 220))}${desc.length > 220 ? '…' : ''}</div>` : ''}
+      ${author != null ? `<div class="book-authors">${escapeHtml(String(author))}</div>` : ''}
+      ${metaHtml ? `<div class="book-meta">${metaHtml}</div>` : ''}
+      ${cat != null ? `<div class="book-category">🏷️ ${escapeHtml(String(cat))}</div>` : ''}
+      ${desc != null ? `<div class="book-desc">${escapeHtml(String(desc).slice(0, 220))}${String(desc).length > 220 ? '…' : ''}</div>` : ''}
     `;
     booksListEl.appendChild(card);
   });
 }
 
-/* ── Star rating helper ────────────────────────────────────────────────────── */
+function pick(obj, keys) {
+  for (const k of keys) {
+    const v = obj[k];
+    if (v != null && v !== '') return v;
+  }
+  return null;
+}
+
 function starsHtml(rating) {
-  const full  = Math.floor(rating);
-  const half  = rating - full >= 0.5 ? 1 : 0;
+  const full = Math.floor(rating);
+  const half = rating - full >= 0.5 ? 1 : 0;
   const empty = 5 - full - half;
   return '★'.repeat(full) + (half ? '½' : '') + '☆'.repeat(empty);
 }
 
-/* ── Utilities ─────────────────────────────────────────────────────────────── */
-function scrollToBottom() {
-  requestAnimationFrame(() => {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  });
-}
 
-function setLoading(val) {
-  isLoading = val;
-  sendBtn.disabled = val;
-  inputEl.disabled = val;
+/* ══════════════════════════════════════════════════════════════
+   UTILITIES
+   ══════════════════════════════════════════════════════════════ */
+function scrollToBottom() {
+  requestAnimationFrame(() => { messagesEl.scrollTop = messagesEl.scrollHeight; });
 }
 
 function escapeHtml(str) {
   return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+function escapeAttr(str) { return String(str).replace(/"/g, '&quot;'); }
 
-function escapeAttr(str) {
-  return String(str).replace(/"/g, '&quot;');
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 let toastTimer;
 function showToast(msg) {
