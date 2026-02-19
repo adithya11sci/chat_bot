@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
-from chatbot import answer_question, load_dataset, get_status
+from chatbot import answer_question, load_dataset, get_status, get_preview
 
 BASE_DIR = os.path.dirname(__file__)
 
@@ -89,6 +89,12 @@ async def upload_dataset_endpoint(file: UploadFile = File(...)):
 async def dataset_status():
     """Return info about the currently loaded dataset."""
     return get_status()
+
+
+@app.get("/dataset/preview")
+async def dataset_preview():
+    """Return first 10 rows of the loaded dataset for UI preview."""
+    return get_preview(10)
 
 
 @app.get("/health")

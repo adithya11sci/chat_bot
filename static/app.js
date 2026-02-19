@@ -23,6 +23,17 @@ const booksCount = document.getElementById('books-count');
 const toastEl = document.getElementById('toast');
 const chipsRow = document.getElementById('chips-row');
 
+// Dataset preview
+const previewEl = document.getElementById('dataset-preview');
+const previewTitle = document.getElementById('preview-title');
+const previewBadge = document.getElementById('preview-badge');
+const previewThead = document.getElementById('preview-thead');
+const previewTbody = document.getElementById('preview-tbody');
+const previewFooter = document.getElementById('preview-footer');
+const previewBody = document.getElementById('preview-body');
+const previewToggle = document.getElementById('preview-toggle');
+const previewHeaderToggle = document.getElementById('preview-header-toggle');
+
 // Upload
 const fileInput = document.getElementById('csv-file-input');
 const uploadBtn = document.getElementById('upload-btn');
@@ -48,8 +59,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     const info = await res.json();
     if (info.ready) {
       onDatasetReady(info.name, info.rows);
-      // Update welcome message for pre-loaded dataset
       appendMessage('bot', `📊 Dataset "${info.name}" is loaded and ready (${Number(info.rows).toLocaleString()} rows). Ask me anything!`);
+      fetchPreview();
     } else {
       setBadge('empty', 'No dataset loaded');
     }
@@ -157,6 +168,9 @@ function onDatasetReady(name, rows) {
       `;
     }
   }
+
+  // Fetch and show dataset preview
+  fetchPreview();
 }
 
 function setChatEnabled(enabled) {
@@ -400,4 +414,61 @@ function showToast(msg) {
   toastEl.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toastEl.classList.remove('show'), 4000);
+}
+
+
+/* ══════════════════════════════════════════════════════════════
+   DATASET PREVIEW
+   ══════════════════════════════════════════════════════════════ */
+let previewOpen = true;
+
+// Toggle collapse/expand
+previewHeaderToggle.addEventListener('click', () => {
+  previewOpen = !previewOpen;
+  previewBody.style.display = previewOpen ? 'block' : 'none';
+  previewToggle.textContent = previewOpen ? '▲' : '▼';
+});
+
+async function fetchPreview() {
+  try {
+    const res = await fetch('/dataset/preview');
+    const data = await res.json();
+    if (data.columns && data.columns.length > 0) {
+      renderPreview(data);
+    }
+  } catch (err) {
+    console.warn('Failed to load preview:', err);
+  }
+}
+
+function renderPreview(data) {
+  const { columns, rows, total, name } = data;
+
+  previewEl.style.display = 'block';
+  previewTitle.textContent = name ? `Preview: ${name}` : 'Dataset Preview';
+  previewBadge.textContent = `${columns.length} columns · ${Number(total).toLocaleString()} rows`;
+
+  // Build table header
+  previewThead.innerHTML = '<tr>' +
+    columns.map(col => `<th>${escapeHtml(col)}</th>`).join('') +
+    '</tr>';
+
+  // Build table body (first N rows)
+  previewTbody.innerHTML = rows.map(row =>
+    '<tr>' +
+    columns.map(col => {
+      const val = row[col];
+      const display = val != null && val !== '' ? String(val) : '—';
+      return `<td title="${escapeAttr(display)}">${escapeHtml(display)}</td>`;
+    }).join('') +
+    '</tr>'
+  ).join('');
+
+  // Footer
+  previewFooter.textContent = `Showing ${rows.length} of ${Number(total).toLocaleString()} rows`;
+
+  // Start expanded
+  previewOpen = true;
+  previewBody.style.display = 'block';
+  previewToggle.textContent = '▲';
 }

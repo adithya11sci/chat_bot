@@ -99,6 +99,27 @@
           </svg>
         </button>
       </form>
+
+      <!-- Dataset preview (shown after upload) -->
+      <div class="dataset-preview" id="dataset-preview" style="display:none">
+        <div class="preview-header" id="preview-header-toggle">
+          <div class="preview-title-row">
+            <span class="preview-icon">📋</span>
+            <span class="preview-title" id="preview-title">Dataset Preview</span>
+            <span class="preview-badge" id="preview-badge"></span>
+          </div>
+          <button class="preview-toggle" id="preview-toggle" aria-label="Toggle preview">▼</button>
+        </div>
+        <div class="preview-body" id="preview-body">
+          <div class="preview-table-wrap">
+            <table class="preview-table" id="preview-table">
+              <thead id="preview-thead"></thead>
+              <tbody id="preview-tbody"></tbody>
+            </table>
+          </div>
+          <div class="preview-footer" id="preview-footer"></div>
+        </div>
+      </div>
     </section>
 
     <!-- Right: Book cards panel -->

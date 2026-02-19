@@ -206,6 +206,36 @@ def get_status() -> dict:
     }
 
 
+# ── Public: get preview rows ─────────────────────────────────────────────────
+def get_preview(n: int = 10) -> dict:
+    """Return the first n rows of the loaded dataset for UI preview."""
+    if not _state["ready"] or not _state["books_metadata"]:
+        return {"columns": [], "rows": [], "total": 0, "name": None}
+
+    columns = _state["dataset_columns"]
+    rows = []
+    for rec in _state["books_metadata"][:n]:
+        row = {}
+        for col in columns:
+            val = rec.get(col, "")
+            if isinstance(val, float) and np.isnan(val):
+                row[col] = ""
+            elif isinstance(val, float) and val == int(val):
+                row[col] = int(val)
+            else:
+                # Truncate long text for preview
+                val_str = str(val) if val is not None else ""
+                row[col] = val_str[:80] + "…" if len(val_str) > 80 else val_str
+        rows.append(row)
+
+    return {
+        "columns": columns,
+        "rows":    rows,
+        "total":   _state["dataset_rows"],
+        "name":    _state["dataset_name"],
+    }
+
+
 # ── Startup: load existing index if present ──────────────────────────────────
 if all(os.path.exists(p) for p in [FAISS_INDEX_PATH, VECTORIZER_PATH,
                                     METADATA_PATH, DATASET_INFO_PATH]):
