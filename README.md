@@ -1,4 +1,4 @@
-<![CDATA[# 📚 BookMind — AI-Powered CSV Chatbot
+# 📚 BookMind — AI-Powered CSV Chatbot
 
 Upload any CSV dataset, and ask questions about it in plain English. BookMind uses **RAG (Retrieval-Augmented Generation)** to find the most relevant rows and generate smart answers using **Groq LLM**.
 
@@ -293,4 +293,3 @@ MIT — free to use, modify, and share.
 ---
 
 **Built with Python, FastAPI, FAISS, and Groq** · _Upload. Ask. Discover._
-]]>
