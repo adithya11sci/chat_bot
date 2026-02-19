@@ -14,3 +14,12 @@ chroma_db_/
 *.log
 .DS_Store
 Thumbs.db
+
+# RAG index files (large binaries - rebuilt automatically at startup)
+faiss_index.bin
+tfidf_vectorizer.pkl
+books_metadata.pkl
+
+# Test scripts
+test_api.py
+test_output.txt
