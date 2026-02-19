@@ -244,6 +244,232 @@ else:
     print("📂 No dataset indexed yet. Upload a CSV via the UI to get started.")
 
 
+# ── Ranking / Superlative Detection ──────────────────────────────────────────
+
+# Tier 1: Exact phrase matching (expanded with many variations)
+_RANK_PHRASES = {
+    # ── Popularity ──
+    "most popular":    {"col_hints": ["ratings_count", "num_ratings", "popularity", "votes", "reviews"], "order": "desc"},
+    "least popular":   {"col_hints": ["ratings_count", "num_ratings", "popularity", "votes", "reviews"], "order": "asc"},
+    "most reviewed":   {"col_hints": ["ratings_count", "num_ratings", "reviews", "review_count"],        "order": "desc"},
+    "most ratings":    {"col_hints": ["ratings_count", "num_ratings"],                                    "order": "desc"},
+    "most reviews":    {"col_hints": ["ratings_count", "num_ratings", "reviews"],                         "order": "desc"},
+    # ── Rating ──
+    "highest rated":   {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "desc"},
+    "highest rating":  {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "desc"},
+    "highest ratings": {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "desc"},
+    "best rated":      {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "desc"},
+    "best rating":     {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "desc"},
+    "best ratings":    {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "desc"},
+    "top rated":       {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "desc"},
+    "top rating":      {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "desc"},
+    "lowest rated":    {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "asc"},
+    "lowest rating":   {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "asc"},
+    "worst rated":     {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "asc"},
+    "worst rating":    {"col_hints": ["average_rating", "rating", "score", "stars"], "order": "asc"},
+    # ── Pages ──
+    "most pages":      {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "desc"},
+    "more pages":      {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "desc"},
+    "highest pages":   {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "desc"},
+    "max pages":       {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "desc"},
+    "fewest pages":    {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "asc"},
+    "fewer pages":     {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "asc"},
+    "least pages":     {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "asc"},
+    "longest book":    {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "desc"},
+    "longest":         {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "desc"},
+    "shortest book":   {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "asc"},
+    "shortest":        {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "asc"},
+    "thickest":        {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "desc"},
+    "thinnest":        {"col_hints": ["num_pages", "pages", "page_count", "length"], "order": "asc"},
+    # ── Year ──
+    "newest":          {"col_hints": ["published_year", "year", "date", "release"], "order": "desc"},
+    "oldest":          {"col_hints": ["published_year", "year", "date", "release"], "order": "asc"},
+    "most recent":     {"col_hints": ["published_year", "year", "date", "release"], "order": "desc"},
+    "latest":          {"col_hints": ["published_year", "year", "date", "release"], "order": "desc"},
+    "earliest":        {"col_hints": ["published_year", "year", "date", "release"], "order": "asc"},
+    # ── Price ──
+    "most expensive":  {"col_hints": ["price", "cost", "amount"], "order": "desc"},
+    "cheapest":        {"col_hints": ["price", "cost", "amount"], "order": "asc"},
+    "least expensive": {"col_hints": ["price", "cost", "amount"], "order": "asc"},
+}
+
+# Tier 2: Superlative words → map to column families dynamically
+# If no phrase match, we look for these superlative words and then scan for
+# column-related words nearby.
+_SUPERLATIVE_HIGH = {"highest", "best", "top", "most", "maximum", "max",
+                     "greatest", "largest", "biggest", "more", "better"}
+_SUPERLATIVE_LOW  = {"lowest", "worst", "least", "minimum", "min", "fewest",
+                     "smallest", "fewer", "less"}
+
+# Column families: what column-related words map to which column hints
+_COLUMN_FAMILIES = {
+    "rating":     ["average_rating", "rating", "score", "stars"],
+    "ratings":    ["average_rating", "rating", "score", "stars"],
+    "rated":      ["average_rating", "rating", "score", "stars"],
+    "score":      ["average_rating", "rating", "score", "stars"],
+    "stars":      ["average_rating", "rating", "score", "stars"],
+    "popular":    ["ratings_count", "num_ratings", "popularity", "votes"],
+    "popularity": ["ratings_count", "num_ratings", "popularity", "votes"],
+    "reviews":    ["ratings_count", "num_ratings", "reviews", "review_count"],
+    "reviewed":   ["ratings_count", "num_ratings", "reviews", "review_count"],
+    "page":       ["num_pages", "pages", "page_count", "length"],
+    "pages":      ["num_pages", "pages", "page_count", "length"],
+    "year":       ["published_year", "year", "date", "release"],
+    "recent":     ["published_year", "year", "date", "release"],
+    "old":        ["published_year", "year", "date", "release"],
+    "new":        ["published_year", "year", "date", "release"],
+    "price":      ["price", "cost", "amount"],
+    "expensive":  ["price", "cost", "amount"],
+    "cheap":      ["price", "cost", "amount"],
+    "cost":       ["price", "cost", "amount"],
+}
+
+
+def _find_matching_column(col_hints: list[str], dataset_columns: list[str]) -> str | None:
+    """Find the first dataset column that matches any of the hint names."""
+    ds_cols_lower = {c.lower(): c for c in dataset_columns}
+    for hint in col_hints:
+        if hint in ds_cols_lower:
+            return ds_cols_lower[hint]
+    # Partial match fallback
+    for hint in col_hints:
+        for col_lower, col_orig in ds_cols_lower.items():
+            if hint in col_lower or col_lower in hint:
+                return col_orig
+    return None
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Simple Levenshtein edit distance between two strings."""
+    if len(a) < len(b):
+        return _edit_distance(b, a)
+    if len(b) == 0:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (ca != cb)))
+        prev = curr
+    return prev[len(b)]
+
+
+def _fuzzy_match_word(word: str, candidates: set[str], max_dist: int = 2) -> str | None:
+    """Check if a word fuzzy-matches any candidate (for typos like 'higgest' → 'highest')."""
+    if word in candidates:
+        return word
+    # Only try fuzzy match for words with 4+ chars to avoid false positives
+    if len(word) < 4:
+        return None
+    for candidate in candidates:
+        if abs(len(word) - len(candidate)) > max_dist:
+            continue
+        if _edit_distance(word, candidate) <= max_dist:
+            return candidate
+    return None
+
+
+def _detect_ranking(query: str) -> tuple[list[str], str] | None:
+    """
+    Detect if the query is a ranking/superlative question.
+    Returns (col_hints, order) or None.
+    Uses three tiers:
+      1. Phrase matching — check for known multi-word phrases
+      2. Fuzzy phrase matching — typo-tolerant phrase detection
+      3. Pattern matching — find superlative words + column-family words
+    """
+    query_lower = query.lower()
+    query_words = query_lower.split()
+
+    # ── Tier 1: exact phrase matching (longer phrases first for specificity) ──
+    for phrase, rule in sorted(_RANK_PHRASES.items(), key=lambda x: -len(x[0])):
+        if phrase in query_lower:
+            return rule["col_hints"], rule["order"]
+
+    # ── Tier 2: fuzzy phrase matching (handle typos like 'higgest rating') ──
+    for phrase, rule in sorted(_RANK_PHRASES.items(), key=lambda x: -len(x[0])):
+        phrase_words = phrase.split()
+        if len(phrase_words) > len(query_words):
+            continue
+        # Check if each word in the phrase fuzzy-matches a word in the query
+        for start in range(len(query_words) - len(phrase_words) + 1):
+            all_match = True
+            for pi, pw in enumerate(phrase_words):
+                qw = query_words[start + pi]
+                if qw != pw and _edit_distance(qw, pw) > 2:
+                    all_match = False
+                    break
+            if all_match:
+                return rule["col_hints"], rule["order"]
+
+    # ── Tier 3: superlative + column-family pattern detection ────────────
+    words = set(query_words)
+
+    # Check direct match first, then fuzzy match
+    high_found = words & _SUPERLATIVE_HIGH
+    low_found  = words & _SUPERLATIVE_LOW
+
+    # Fuzzy match for typos (e.g., "higgest" → "highest")
+    if not high_found and not low_found:
+        for w in query_words:
+            if _fuzzy_match_word(w, _SUPERLATIVE_HIGH):
+                high_found = {w}
+                break
+            if _fuzzy_match_word(w, _SUPERLATIVE_LOW):
+                low_found = {w}
+                break
+
+    if not high_found and not low_found:
+        return None
+
+    # Determine order
+    order = "desc" if high_found else "asc"
+
+    # Find which column family is mentioned
+    for word in query_words:
+        # Check exact word and also stems (e.g. "rating" in "ratings")
+        for family_key, col_hints in _COLUMN_FAMILIES.items():
+            if word == family_key or family_key in word or word in family_key:
+                return col_hints, order
+
+    # Special case: if we see high/low superlatives but no column-family word,
+    # check if any dataset column name appears in the query
+    ds_cols_lower = {c.lower(): c for c in _state.get("dataset_columns", [])}
+    for col_lower in ds_cols_lower:
+        if col_lower in query_lower or col_lower.replace("_", " ") in query_lower:
+            return [col_lower], order
+
+    return None
+
+
+def _get_sorted_records(query: str, n: int = 10) -> tuple[list[dict], str | None, str | None]:
+    """
+    If the query contains ranking/superlative keywords, return the actual
+    top or bottom N records sorted by the relevant numeric column.
+    Returns: (sorted_records, sort_column, sort_order) or ([], None, None).
+    """
+    if not _state["ready"] or not _state["books_metadata"]:
+        return [], None, None
+
+    result = _detect_ranking(query)
+    if not result:
+        return [], None, None
+
+    col_hints, order = result
+    col = _find_matching_column(col_hints, _state["dataset_columns"])
+    if not col:
+        return [], None, None
+
+    ascending = order == "asc"
+    df = pd.DataFrame(_state["books_metadata"])
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+    df_sorted = df.dropna(subset=[col]).sort_values(by=col, ascending=ascending).head(n)
+
+    records = df_sorted.to_dict(orient="records")
+    print(f"📊 Ranking query detected → sorted by '{col}' ({order}), returning {len(records)} records")
+    return records, col, order
+
+
 # ── RAG Retrieval ─────────────────────────────────────────────────────────────
 MIN_SCORE = 0.05
 
@@ -270,15 +496,32 @@ def _retrieve(query: str, top_k: int = 7) -> list[dict]:
 # ── Clean dict for JSON output ────────────────────────────────────────────────
 def _clean(book: dict) -> dict:
     out = {}
+    # Map internal column names to user-preferred JSON keys
+    mapping = {
+        "authors":    "author",
+        "categories": "category",
+        "num_pages":  "pages",
+        "isbn13":     "isbn",
+    }
+
     for k, v in book.items():
         if k.startswith("_"):
             continue
+        
+        # Rename key if in mapping
+        key = mapping.get(k, k)
+
         if isinstance(v, float) and np.isnan(v):
-            out[k] = None
+            out[key] = None
         elif isinstance(v, float) and v == int(v):
-            out[k] = int(v)
+            out[key] = int(v)
         else:
-            out[k] = v
+            out[key] = v
+            
+    # Helper: Ensure essential keys exist
+    if "language" not in out:
+        out["language"] = "English"  # Default
+
     return out
 
 
@@ -290,74 +533,117 @@ def answer_question(user_query: str) -> dict:
             "metadata": [],
         }
 
-    # Dataset metadata — the LLM needs to know the FULL dataset stats
-    ds_name    = _state["dataset_name"] or "Unknown"
-    ds_rows    = _state["dataset_rows"]
-    ds_columns = _state["dataset_columns"]
+    try:
+        # Dataset metadata — the LLM needs to know the FULL dataset stats
+        ds_name    = _state["dataset_name"] or "Unknown"
+        ds_rows    = _state["dataset_rows"]
+        ds_columns = _state["dataset_columns"]
 
-    # 1. RETRIEVE
-    retrieved = _retrieve(user_query, top_k=7)
+        # 1. RETRIEVE — text-similarity search
+        retrieved = _retrieve(user_query, top_k=7)
 
-    if not retrieved:
+        # 2. RANKING BOOST — for superlative queries, get actual sorted records
+        sorted_records, sort_col, sort_order = _get_sorted_records(user_query, n=10)
+
+        # Merge: sorted records first (they are the ground truth for rankings),
+        # then any FAISS results not already included
+        if sorted_records:
+            # Use a set of unique identifiers to avoid duplicates
+            seen = set()
+            merged = []
+            for rec in sorted_records:
+                key = tuple(str(rec.get(c, "")) for c in ds_columns[:3])  # identify by first 3 cols
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(rec)
+            for rec in retrieved:
+                key = tuple(str(rec.get(c, "")) for c in ds_columns[:3])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(rec)
+            final_records = merged
+            context_label = f"Records sorted by '{sort_col}' ({sort_order}ending)"
+        else:
+            final_records = retrieved
+            context_label = f"Top {len(retrieved)} most relevant records"
+
+        if not final_records:
+            return {
+                "response": (
+                    "I couldn't find any relevant results for your question. "
+                    "Could you rephrase or try different keywords?"
+                ),
+                "metadata": [],
+            }
+
+        # 3. AUGMENT — build context from records
+        columns = ds_columns
+        context_blocks = []
+        for i, book in enumerate(final_records):
+            lines = [f"[Record {i+1}]"]
+            for col in columns:
+                val = book.get(col, "")
+                if val is None or val == "" or (isinstance(val, float) and np.isnan(val)):
+                    continue
+                val_str = str(val)
+                if len(val_str) > 600:
+                    val_str = val_str[:600] + "…"
+                lines.append(f"{col}: {val_str}")
+            context_blocks.append("\n".join(lines))
+
+        context = ("\n" + "-" * 60 + "\n").join(context_blocks)
+
+        # 4. GENERATE — system prompt includes FULL dataset metadata
+        sort_note = ""
+        if sorted_records and sort_col:
+            sort_note = (
+                f"\nIMPORTANT: The context below contains records ACTUALLY sorted by '{sort_col}' "
+                f"from the FULL dataset of {ds_rows} records. These ARE the real top/bottom records, "
+                f"not just text-similar ones. Use them confidently for ranking answers.\n"
+            )
+
+        system_prompt = (
+            f"You are an expert data assistant for a dataset called '{ds_name}'.\n"
+            f"IMPORTANT DATASET FACTS (use these for aggregate/count questions):\n"
+            f"  - Dataset name: {ds_name}\n"
+            f"  - Total number of records in the FULL dataset: {ds_rows}\n"
+            f"  - Columns: {', '.join(ds_columns)}\n"
+            f"{sort_note}\n"
+            f"RULES:\n"
+            f"1. For questions about total counts, totals, or 'how many', use the DATASET FACTS above "
+            f"   (total records = {ds_rows}), NOT the number of retrieved context records.\n"
+            f"2. Answer using ONLY the dataset facts and context provided. Do NOT invent data.\n"
+            f"3. Be warm, conversational, and specific — quote values when relevant.\n"
+            f"4. Plain text only, no markdown formatting."
+        )
+
+        user_prompt = (
+            f"User's Question:\n{user_query}\n\n"
+            f"Context — {context_label} (out of {ds_rows} total records):\n"
+            f"{context}\n\n"
+            f"Answer the user's question. Remember: the FULL dataset has {ds_rows} records total."
+        )
+
+        llm_response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=700,
+        ).choices[0].message.content.strip()
+
         return {
-            "response": (
-                "I couldn't find any relevant results for your question. "
-                "Could you rephrase or try different keywords?"
-            ),
-            "metadata": [],
+            "response": llm_response,
+            "metadata": [_clean(b) for b in final_records],
         }
 
-    # 2. AUGMENT — build context from retrieved rows
-    columns = ds_columns
-    context_blocks = []
-    for i, book in enumerate(retrieved):
-        lines = [f"[Record {i+1}]"]
-        for col in columns:
-            val = book.get(col, "")
-            if val is None or val == "" or (isinstance(val, float) and np.isnan(val)):
-                continue
-            val_str = str(val)
-            if len(val_str) > 600:
-                val_str = val_str[:600] + "…"
-            lines.append(f"{col}: {val_str}")
-        context_blocks.append("\n".join(lines))
-
-    context = ("\n" + "-" * 60 + "\n").join(context_blocks)
-
-    # 3. GENERATE — system prompt includes FULL dataset metadata
-    system_prompt = (
-        f"You are an expert data assistant for a dataset called '{ds_name}'.\n"
-        f"IMPORTANT DATASET FACTS (use these for aggregate/count questions):\n"
-        f"  - Dataset name: {ds_name}\n"
-        f"  - Total number of records in the FULL dataset: {ds_rows}\n"
-        f"  - Columns: {', '.join(ds_columns)}\n\n"
-        f"RULES:\n"
-        f"1. For questions about total counts, totals, or 'how many', use the DATASET FACTS above "
-        f"   (total records = {ds_rows}), NOT the number of retrieved context records.\n"
-        f"2. The context below shows only the TOP {len(retrieved)} most relevant records out of {ds_rows} total.\n"
-        f"3. Answer using ONLY the dataset facts and context provided. Do NOT invent data.\n"
-        f"4. Be warm, conversational, and specific — quote values when relevant.\n"
-        f"5. Plain text only, no markdown formatting."
-    )
-
-    user_prompt = (
-        f"User's Question:\n{user_query}\n\n"
-        f"Context — Top {len(retrieved)} most relevant records (out of {ds_rows} total):\n"
-        f"{context}\n\n"
-        f"Answer the user's question. Remember: the FULL dataset has {ds_rows} records total."
-    )
-
-    llm_response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt},
-        ],
-        temperature=0.3,
-        max_tokens=700,
-    ).choices[0].message.content.strip()
-
-    return {
-        "response": llm_response,
-        "metadata": [_clean(b) for b in retrieved],
-    }
+    except Exception as e:
+        print(f"❌ Error in answer_question: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "response": f"I encountered an error while processing your request: {str(e)}",
+            "metadata": [],
+        }

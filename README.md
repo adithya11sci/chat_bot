@@ -199,14 +199,62 @@ Open **http://localhost:8000** in your browser.
 | `GET` | `/dataset/preview` | Get first 10 rows of the dataset |
 | `GET` | `/health` | Health check |
 
-### Example — Chat
+### Example `curl` Commands
 
-**Request:**
+#### 1. Health Check — `GET /health`
+
+```bash
+curl http://localhost:8000/health
+```
+
+**Response:**
+```json
+{ "status": "ok", "dataset_ready": false }
+```
+
+---
+
+#### 2. Upload a CSV Dataset — `POST /upload`
+
+```bash
+curl -X POST http://localhost:8000/upload \
+  -F "file=@books_cleaned.csv"
+```
+
+> **Windows (CMD):**
+> ```cmd
+> curl -X POST http://localhost:8000/upload -F "file=@books_cleaned.csv"
+> ```
+
+**Response:**
+```json
+{
+  "message": "Dataset 'books_cleaned.csv' indexed successfully.",
+  "dataset_name": "books_cleaned.csv",
+  "total_rows": 2013,
+  "columns": ["isbn13", "title", "subtitle", "authors", "categories", "description", "published_year", "average_rating", "num_pages", "ratings_count"]
+}
+```
+
+---
+
+#### 3. Ask a Question — `POST /chat`
+
 ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"question": "Top 5 highest rated books"}'
 ```
+
+> **Windows (CMD):**
+> ```cmd
+> curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Top 5 highest rated books\"}"
+> ```
+
+> **Windows (PowerShell):**
+> ```powershell
+> curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"question": "Top 5 highest rated books"}'
+> ```
 
 **Response:**
 ```json
@@ -221,6 +269,55 @@ curl -X POST http://localhost:8000/chat \
       "num_pages": 241
     }
   ]
+}
+```
+
+---
+
+#### 4. Dataset Status — `GET /dataset/status`
+
+```bash
+curl http://localhost:8000/dataset/status
+```
+
+**Response (when a dataset is loaded):**
+```json
+{
+  "ready": true,
+  "dataset_name": "books_cleaned.csv",
+  "total_rows": 2013,
+  "columns": ["isbn13", "title", "subtitle", "authors", "categories", "description", "published_year", "average_rating", "num_pages", "ratings_count"]
+}
+```
+
+**Response (no dataset loaded):**
+```json
+{
+  "ready": false,
+  "dataset_name": null,
+  "total_rows": 0,
+  "columns": []
+}
+```
+
+---
+
+#### 5. Dataset Preview — `GET /dataset/preview`
+
+```bash
+curl http://localhost:8000/dataset/preview
+```
+
+**Response:**
+```json
+{
+  "columns": ["isbn13", "title", "authors", "average_rating", "..."],
+  "rows": [
+    { "isbn13": "9780002261982", "title": "Spider's Web", "authors": "Agatha Christie", "average_rating": 4.9 },
+    { "isbn13": "9780006280897", "title": "The One Tree", "authors": "Stephen R. Donaldson", "average_rating": 3.97 }
+  ],
+  "total_rows": 2013,
+  "showing": 10
 }
 ```
 
