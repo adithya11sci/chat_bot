@@ -244,7 +244,6 @@ else:
     print("📂 No dataset indexed yet. Upload a CSV via the UI to get started.")
 
 
-# ── Ranking / Superlative Detection ──────────────────────────────────────────
 
 # Tier 1: Exact phrase matching (expanded with many variations)
 _RANK_PHRASES = {
@@ -293,13 +292,19 @@ _RANK_PHRASES = {
     "least expensive": {"col_hints": ["price", "cost", "amount"], "order": "asc"},
 }
 
-# Tier 2: Superlative words → map to column families dynamically
-# If no phrase match, we look for these superlative words and then scan for
-# column-related words nearby.
-_SUPERLATIVE_HIGH = {"highest", "best", "top", "most", "maximum", "max",
-                     "greatest", "largest", "biggest", "more", "better"}
-_SUPERLATIVE_LOW  = {"lowest", "worst", "least", "minimum", "min", "fewest",
-                     "smallest", "fewer", "less"}
+# Tier 2: Superlative words (including base / comparative forms)
+_SUPERLATIVE_HIGH = {"high", "higher", "highest", "best", "top", "most",
+                     "maximum", "max", "greatest", "largest", "biggest",
+                     "more", "better", "great", "large", "big"}
+_SUPERLATIVE_LOW  = {"low", "lower", "lowest", "worst", "least", "minimum",
+                     "min", "fewest", "smallest", "fewer", "less", "small",
+                     "little"}
+
+# Ordinal words — if a user says "second highest" or "third largest", it's ranking
+_ORDINAL_INDICATORS = {"first", "second", "third", "fourth", "fifth",
+                       "sixth", "seventh", "eighth", "ninth", "tenth",
+                       "1st", "2nd", "3rd", "4th", "5th",
+                       "last", "next"}
 
 # Column families: what column-related words map to which column hints
 _COLUMN_FAMILIES = {
@@ -369,104 +374,155 @@ def _fuzzy_match_word(word: str, candidates: set[str], max_dist: int = 2) -> str
     return None
 
 
-def _detect_ranking(query: str) -> tuple[list[str], str] | None:
+def _is_ranking_query(query: str) -> bool:
     """
-    Detect if the query is a ranking/superlative question.
-    Returns (col_hints, order) or None.
-    Uses three tiers:
-      1. Phrase matching — check for known multi-word phrases
-      2. Fuzzy phrase matching — typo-tolerant phrase detection
-      3. Pattern matching — find superlative words + column-family words
+    Quick rule-based check: does the query contain ranking/superlative language?
+    This is a fast gate so we only call the LLM when needed.
     """
     query_lower = query.lower()
     query_words = query_lower.split()
-
-    # ── Tier 1: exact phrase matching (longer phrases first for specificity) ──
-    for phrase, rule in sorted(_RANK_PHRASES.items(), key=lambda x: -len(x[0])):
-        if phrase in query_lower:
-            return rule["col_hints"], rule["order"]
-
-    # ── Tier 2: fuzzy phrase matching (handle typos like 'higgest rating') ──
-    for phrase, rule in sorted(_RANK_PHRASES.items(), key=lambda x: -len(x[0])):
-        phrase_words = phrase.split()
-        if len(phrase_words) > len(query_words):
-            continue
-        # Check if each word in the phrase fuzzy-matches a word in the query
-        for start in range(len(query_words) - len(phrase_words) + 1):
-            all_match = True
-            for pi, pw in enumerate(phrase_words):
-                qw = query_words[start + pi]
-                if qw != pw and _edit_distance(qw, pw) > 2:
-                    all_match = False
-                    break
-            if all_match:
-                return rule["col_hints"], rule["order"]
-
-    # ── Tier 3: superlative + column-family pattern detection ────────────
     words = set(query_words)
 
-    # Check direct match first, then fuzzy match
-    high_found = words & _SUPERLATIVE_HIGH
-    low_found  = words & _SUPERLATIVE_LOW
+    # Check superlative words (direct match)
+    if words & _SUPERLATIVE_HIGH or words & _SUPERLATIVE_LOW:
+        return True
 
-    # Fuzzy match for typos (e.g., "higgest" → "highest")
-    if not high_found and not low_found:
-        for w in query_words:
-            if _fuzzy_match_word(w, _SUPERLATIVE_HIGH):
-                high_found = {w}
-                break
-            if _fuzzy_match_word(w, _SUPERLATIVE_LOW):
-                low_found = {w}
-                break
+    # Ordinal + any sort-related word (e.g. "third high", "second largest")
+    if words & _ORDINAL_INDICATORS:
+        return True
 
-    if not high_found and not low_found:
+    # Check known ranking phrases
+    for phrase in _RANK_PHRASES:
+        if phrase in query_lower:
+            return True
+
+    # Fuzzy match for typos (e.g. "higgest" → "highest")
+    for w in query_words:
+        if _fuzzy_match_word(w, _SUPERLATIVE_HIGH) or _fuzzy_match_word(w, _SUPERLATIVE_LOW):
+            return True
+
+    return False
+
+
+def _detect_sort_params_llm(query: str, columns: list[str]) -> tuple[str, str] | None:
+    """
+    Use the LLM to determine which column to sort by and in which direction.
+    Returns (column_name, order) or None.
+    """
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a data analysis helper. Respond ONLY with valid JSON, nothing else.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"A user asked this question about a dataset:\n"
+                        f"\"{query}\"\n\n"
+                        f"The dataset has these columns:\n{columns}\n\n"
+                        f"Which SINGLE numeric column should the data be sorted by to answer "
+                        f"this question?\n\n"
+                        f"COLUMN SELECTION RULES:\n"
+                        f"- Pick the column whose name BEST matches the user's words\n"
+                        f"- 'rating count' or 'ratings count' → pick a column with 'count' in name (e.g. ratings_count), NOT average_rating\n"
+                        f"- 'rating' or 'rated' (without 'count') → pick average_rating or similar\n"
+                        f"- Match the INTENT: if user says 'count', 'number of', 'total' → pick a count/quantity column\n\n"
+                        f"SORT DIRECTION RULES:\n"
+                        f"- high/highest/top/best/most/largest → \"desc\"\n"
+                        f"- low/lowest/worst/least/smallest → \"asc\"\n\n"
+                        f"Respond ONLY with JSON: {{\"column\": \"<exact_column_name>\", \"order\": \"desc\" or \"asc\"}}\n"
+                        f"The column value MUST exactly match one of the column names listed above."
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=80,
+        )
+
+        text = response.choices[0].message.content.strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        result = json.loads(text)
+        col = result.get("column")
+        order = result.get("order", "desc")
+
+        if col in columns:
+            print(f"🧠 LLM sort detection: column='{col}', order='{order}'")
+            return col, order
+
+        # Case-insensitive fallback
+        col_map = {c.lower(): c for c in columns}
+        if col and col.lower() in col_map:
+            actual = col_map[col.lower()]
+            print(f"🧠 LLM sort detection (case-fixed): column='{actual}', order='{order}'")
+            return actual, order
+
+        print(f"⚠️ LLM returned unknown column: '{col}'")
+        return None
+    except Exception as e:
+        print(f"⚠️ LLM sort detection failed: {e}")
         return None
 
-    # Determine order
-    order = "desc" if high_found else "asc"
 
-    # Find which column family is mentioned
-    for word in query_words:
-        # Check exact word and also stems (e.g. "rating" in "ratings")
-        for family_key, col_hints in _COLUMN_FAMILIES.items():
-            if word == family_key or family_key in word or word in family_key:
-                return col_hints, order
+def _detect_order(query: str) -> str:
+    """
+    Rule-based sort direction detection — more reliable than LLM for this.
+    Returns 'desc' or 'asc'.
+    """
+    query_lower = query.lower()
+    words = set(query_lower.split())
 
-    # Special case: if we see high/low superlatives but no column-family word,
-    # check if any dataset column name appears in the query
-    ds_cols_lower = {c.lower(): c for c in _state.get("dataset_columns", [])}
-    for col_lower in ds_cols_lower:
-        if col_lower in query_lower or col_lower.replace("_", " ") in query_lower:
-            return [col_lower], order
+    # Check for explicit low/descending words
+    if words & _SUPERLATIVE_LOW:
+        return "asc"
 
-    return None
+    # Check for phrases that clearly mean ascending
+    for phrase in _RANK_PHRASES:
+        if phrase in query_lower and _RANK_PHRASES[phrase]["order"] == "asc":
+            return "asc"
+
+    # Default to descending (most common: "highest", "best", "top", "most", etc.)
+    return "desc"
 
 
 def _get_sorted_records(query: str, n: int = 10) -> tuple[list[dict], str | None, str | None]:
     """
-    If the query contains ranking/superlative keywords, return the actual
-    top or bottom N records sorted by the relevant numeric column.
+    If the query is a ranking/superlative question, use the LLM to identify
+    the correct sort column, then return the actual top/bottom N records.
     Returns: (sorted_records, sort_column, sort_order) or ([], None, None).
     """
     if not _state["ready"] or not _state["books_metadata"]:
         return [], None, None
 
-    result = _detect_ranking(query)
+    # Fast gate: skip LLM call if no superlative/ranking language detected
+    if not _is_ranking_query(query):
+        return [], None, None
+
+    # LLM determines the exact column (it's great at this)
+    result = _detect_sort_params_llm(query, _state["dataset_columns"])
     if not result:
         return [], None, None
 
-    col_hints, order = result
-    col = _find_matching_column(col_hints, _state["dataset_columns"])
-    if not col:
-        return [], None, None
+    col, llm_order = result
+
+    # Use rule-based direction — more reliable than LLM for sort order
+    order = _detect_order(query)
+    if order != llm_order:
+        print(f"🔄 Overriding LLM order '{llm_order}' → '{order}' (rule-based)")
 
     ascending = order == "asc"
+
     df = pd.DataFrame(_state["books_metadata"])
     df[col] = pd.to_numeric(df[col], errors="coerce")
     df_sorted = df.dropna(subset=[col]).sort_values(by=col, ascending=ascending).head(n)
 
     records = df_sorted.to_dict(orient="records")
-    print(f"📊 Ranking query detected → sorted by '{col}' ({order}), returning {len(records)} records")
+    print(f"📊 Ranking query → sorted by '{col}' ({order}), returning {len(records)} records")
     return records, col, order
 
 
@@ -495,33 +551,17 @@ def _retrieve(query: str, top_k: int = 7) -> list[dict]:
 
 # ── Clean dict for JSON output ────────────────────────────────────────────────
 def _clean(book: dict) -> dict:
+    """Clean a record dict for JSON output — works with any dataset."""
     out = {}
-    # Map internal column names to user-preferred JSON keys
-    mapping = {
-        "authors":    "author",
-        "categories": "category",
-        "num_pages":  "pages",
-        "isbn13":     "isbn",
-    }
-
     for k, v in book.items():
         if k.startswith("_"):
             continue
-        
-        # Rename key if in mapping
-        key = mapping.get(k, k)
-
         if isinstance(v, float) and np.isnan(v):
-            out[key] = None
+            out[k] = None
         elif isinstance(v, float) and v == int(v):
-            out[key] = int(v)
+            out[k] = int(v)
         else:
-            out[key] = v
-            
-    # Helper: Ensure essential keys exist
-    if "language" not in out:
-        out["language"] = "English"  # Default
-
+            out[k] = v
     return out
 
 

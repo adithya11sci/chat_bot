@@ -263,7 +263,7 @@ async function sendMessage(e) {
     }
 
     const data = await res.json();
-    appendMessage('bot', data.response);
+    appendMessageWithJson('bot', data.response, data);
     renderBooks(data.metadata || []);
 
   } catch (err) {
@@ -295,6 +295,64 @@ function appendMessage(role, text) {
   `;
   messagesEl.appendChild(div);
   scrollToBottom();
+}
+
+/* ── Store JSON data for copy functionality ─ */
+const _jsonStore = {};
+
+function appendMessageWithJson(role, text, jsonData) {
+  const isBot = role === 'bot';
+  const div = document.createElement('div');
+  div.className = `message ${isBot ? 'bot-message' : 'user-message'}`;
+
+  const jsonId = 'json-' + Date.now();
+  const prettyJson = JSON.stringify(jsonData, null, 2);
+  _jsonStore[jsonId] = prettyJson;
+  const highlightedJson = syntaxHighlight(prettyJson);
+
+  div.innerHTML = `
+    <div class="avatar ${isBot ? 'bot-avatar' : 'user-avatar'}">${isBot ? '🤖' : '👤'}</div>
+    <div class="bubble-group">
+      <div class="bubble">${escapeHtml(text)}</div>
+      <div class="json-block" id="${jsonId}">
+        <div class="json-header">
+          <span class="json-label">📦 JSON Response</span>
+          <button class="json-copy-btn" onclick="copyJson('${jsonId}')" title="Copy JSON">
+            📋 Copy
+          </button>
+        </div>
+        <pre class="json-pre"><code>${highlightedJson}</code></pre>
+      </div>
+    </div>
+  `;
+  messagesEl.appendChild(div);
+  scrollToBottom();
+}
+
+function copyJson(jsonId) {
+  const jsonStr = _jsonStore[jsonId] || '';
+  const btn = document.querySelector('#' + jsonId + ' .json-copy-btn');
+  navigator.clipboard.writeText(jsonStr).then(function () {
+    if (btn) {
+      btn.textContent = '✅ Copied!';
+      setTimeout(function () { btn.textContent = '📋 Copy'; }, 1500);
+    }
+  });
+}
+
+function syntaxHighlight(json) {
+  var s = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  s = s.replace(/"(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?/g, function (match) {
+    var cls = 'json-string';
+    if (match.endsWith(':')) {
+      cls = 'json-key';
+    }
+    return '<span class="' + cls + '">' + match.replace(/:$/, '') + '</span>' + (match.endsWith(':') ? ':' : '');
+  });
+  s = s.replace(/\b(true|false)\b/g, '<span class="json-bool">$1</span>');
+  s = s.replace(/\bnull\b/g, '<span class="json-null">null</span>');
+  s = s.replace(/\b(-?\d+(\.\d+)?([eE][+-]?\d+)?)\b/g, '<span class="json-number">$1</span>');
+  return s;
 }
 
 function showTyping() {
